@@ -5,7 +5,6 @@ const {
 } = require("stremio-addon-sdk");
 const processfiles = require("./processfiles");
 const opensubtitles = require("./opensubtitles");
-var express = require("express");
 const connection = require("./connection");
 const languages = require("./languages");
 const apikey = require("./apikey");
@@ -15,7 +14,7 @@ const builder = new addonBuilder({
   id: "org.autotranslate.sonsuzanime",
   version: "1.0.1",
   name: "Auto Subtitle Translate by SonsuzAnime (DeepL)",
-  logo: "https://stremioaddon.sonsuzanime.com/subtitles/logo.png",
+  logo: "https://deeplsubtitle.sonsuzanime.com/subtitles/logo.png",
   configurable: true,
   behaviorHints: {
     configurable: true,
