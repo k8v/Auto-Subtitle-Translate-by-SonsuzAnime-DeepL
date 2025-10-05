@@ -186,7 +186,7 @@ builder.defineSubtitlesHandler(async ({ id, type, extra }) => {
 
 // Lancer le serveur (si l'add-on est exécuté en tant que module principal)
 if (require.main === module) {
-    serveHTTP(builder.get manifestó(), { port: process.env.PORT || 7000 });
+    serveHTTP(builder.getManifest(), { port: process.env.PORT || 7000 });
 }
 
 module.exports = builder.getManifest();
