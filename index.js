@@ -1,287 +1,192 @@
-const {
-  addonBuilder,
-  serveHTTP,
-  publishToCentral,
-} = require("stremio-addon-sdk");
-const processfiles = require("./processfiles");
-const opensubtitles = require("./opensubtitles");
-const connection = require("./connection");
-const languages = require("./languages");
-const apikey = require("./apikey");
-const logger = require("./logger");
+const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+const translate = require('./deepl-translate');
+const opensubtitles = require('./opensubtitles');
+const request = require('request-promise-native'); // Utilisé pour les requêtes aux add-ons externes
 
-const builder = new addonBuilder({
-  id: "org.autotranslate.sonsuzanime",
-  version: "1.0.1",
-  name: "Auto Subtitle Translate by SonsuzAnime (DeepL)",
-  logo: "https://deeplsubtitle.sonsuzanime.com/subtitles/logo.png",
-  configurable: true,
-  behaviorHints: {
-    configurable: true,
-    configurationRequired: true,
-  },
-  config: [
-    {
-      key: "translateto",
-      title: "Translate to",
-      type: "select",
-      required: true,
-      options: languages.getAllValues(),
-    },
-    {
-      key: "apikey",
-      title: "DeepL Translate API Key",
-      type: "text",
-      required: true,
-    },
-  ],
-  description:
-    "This addon takes subtitles from OpenSubtitlesV3 then translates into desired language.For donations: https://www.buymeacoffee.com/sonsuzosman Bug report: infinity@sonsuzanime.com",
-  types: ["series", "movie"],
-  catalogs: [],
-  resources: ["subtitles"],
-});
+// Codes de langue (ISO 639-2/639-1) que nous allons rechercher dans TOUTES les sources.
+// Ces langues seront utilisées comme 'source' pour la traduction DeepL.
+// Nous incluons les codes à 3 lettres (ISO 639-2) et à 2 lettres (ISO 639-1)
+const SUPPORTED_SOURCE_LANGS = [
+    'eng', 'en', // Anglais
+    'fra', 'fr', // Français
+    'deu', 'de', // Allemand
+    'spa', 'es', // Espagnol
+    'chi', 'zho', 'zh', // Chinois
+    'kor', 'ko', // Coréen
+    'jpn', 'ja'  // Japonais
+];
 
-builder.defineSubtitlesHandler(async function (args) {
-  try {
-    const { id, config } = args;
-    const iso639_1 = languages.getKeyFromValue(config.translateto);
-    let iso639_2 = languages.getISO639_2Code(iso639_1);
-    if (iso639_2 === undefined) {
-      iso639_2 = iso639_1;
-    }
-    let imdbid = null;
-    if (id !== null && id.startsWith("tt")) {
-      const parts = id.split(":");
-      if (parts.length >= 1) {
-        imdbid = parts[0];
-      } else {
-        logger.warn("Invalid ID format");
-        return { subtitles: [] };
-      }
-    } else {
-      imdbid = null;
-      return { subtitles: [] };
-    }
+// --------------------------------------------------------------------------------
+// Nouvelle fonction pour interroger les add-ons externes configurés
+// --------------------------------------------------------------------------------
 
-    const { type, season = null, episode = null } = parseId(id);
-    const apikeyremaining = await apikey.checkapikey(config.apikey);
-    logger.info(
-      `Request details - API Key: ${config.apikey}, Remaining: ${apikeyremaining}, Language: ${iso639_1} (${iso639_2})`
-    );
+/**
+ * Interroge les add-ons de sous-titres externes pour obtenir des sous-titres.
+ * @param {string} type - 'movie' ou 'series'
+ * @param {string} id - L'ID de Stremio (ex: 'tt1234567')
+ * @param {Array<string>} externalAddonUrls - Liste des URLs de manifestes des add-ons externes
+ * @returns {Promise<Array<Object>>} - Tableau de sous-titres au format Stremio
+ */
+async function searchExternalAddons(type, id, externalAddonUrls) {
+    let allExternalSubs = [];
+    const [imdbId] = id.split(':');
 
-    if (!config.apikey || apikeyremaining === false) {
-      logger.error(`Invalid or depleted API key: ${config.apikey}`);
-      return {
-        subtitles: [
-          {
-            id: `Apikey error`,
-            url: `https://deeplsubtitle.sonsuzanime.com/subtitles/apikeyerror.srt`,
-            lang: iso639_2,
-          },
-        ],
-      };
+    for (const manifestUrl of externalAddonUrls) {
+        try {
+            // 1. Déduire l'URL de base de l'add-on externe
+            const baseUrl = manifestUrl.replace('/manifest.json', '').replace('/configure', '');
+
+            // 2. Construire l'URL de la requête de sous-titres
+            // Exemple: https://subhero.onrender.com/subtitles/movie/tt1234567.json
+            const subRequestUrl = `${baseUrl}/subtitles/${type}/${id}.json`;
+
+            console.log(`Interrogation de la source externe: ${subRequestUrl}`);
+
+            // 3. Effectuer la requête HTTP
+            const response = await request({
+                uri: subRequestUrl,
+                json: true,
+                timeout: 5000 
+            });
+
+            if (response && Array.isArray(response.subtitles)) {
+                // 4. Mappage et filtrage des résultats
+                const sourceName = baseUrl.includes('subhero') ? 'SubHero' : 
+                                   baseUrl.includes('gestdown') ? 'Gestdown' : 
+                                   new URL(baseUrl).hostname.split('.').slice(-2, -1)[0] || 'Externe'; // Essayer d'obtenir le nom de domaine
+
+                const mappedSubs = response.subtitles
+                    .filter(sub => SUPPORTED_SOURCE_LANGS.includes(sub.lang.toLowerCase())) // On ne garde que les langues sources que l'on supporte pour la traduction
+                    .map(sub => ({
+                        ...sub,
+                        label: `[${sourceName}] ${sub.label || sub.lang.toUpperCase()}`,
+                        source: sourceName
+                    }));
+
+                allExternalSubs = allExternalSubs.concat(mappedSubs);
+            }
+
+        } catch (error) {
+            console.error(`Erreur lors de l'interrogation de l'add-on ${manifestUrl}:`, error.message);
+            // Continuer avec l'add-on suivant même en cas d'erreur
+        }
     }
 
+    return allExternalSubs;
+}
+
+// --------------------------------------------------------------------------------
+// Définition du Manifeste
+// --------------------------------------------------------------------------------
+
+const manifest = {
+    id: 'org.stremio.auto-subtitle-translate-by-sonsuzanime-deepl-modified',
+    version: '1.0.0',
+    name: 'Auto-Subtitle DeepL (Multi-Source/Langue)',
+    description: 'Traduit automatiquement les sous-titres sources trouvés (EN, FR, DE, ES, ZH, KO, JP, etc.) vers votre langue cible via DeepL. Supporte les sources OpenSubtitles et externes configurables.',
+    resources: ['subtitles'],
+    types: ['movie', 'series'],
+    catalogs: [],
+    idPrefixes: ['tt'],
+    endpoint: '/manifest.json',
+    // La page de configuration est désormais nécessaire pour toutes les options
+    config: [
+        { id: 'deeplAuthKey', name: 'Clé DeepL', type: 'text', required: true, default: '' },
+        { id: 'targetLanguage', name: 'Langue Cible (DeepL)', type: 'select', options: ['FR', 'EN', 'ES', 'DE', 'IT', 'PT'], required: true, default: 'FR' },
+        { id: 'externalAddons', name: 'URLs Manifestes Externes', type: 'text', required: false, default: '', options: { textarea: true } }
+    ]
+};
+
+const builder = new addonBuilder(manifest);
+
+// --------------------------------------------------------------------------------
+// Définition du Subtitles Handler (Le cœur de l'add-on)
+// --------------------------------------------------------------------------------
+
+builder.defineSubtitlesHandler(async ({ id, type, extra }) => {
+    let config = {};
+    if (extra.config) {
+        try {
+            config = JSON.parse(extra.config);
+        } catch (e) {
+            console.error("Erreur de parsing de la configuration:", e);
+        }
+    }
+    
+    // Récupération des paramètres de configuration
+    const DEEPL_AUTH_KEY = config.deeplAuthKey;
+    const TARGET_LANG = config.targetLanguage;
+    // La liste des URLs d'add-ons externe (séparées par des sauts de ligne si elles viennent du textarea)
+    const EXTERNAL_ADDON_URLS = (config.externalAddons || '')
+        .split('\n')
+        .map(url => url.trim())
+        .filter(url => url.length > 0);
+    
+    if (!DEEPL_AUTH_KEY || !TARGET_LANG) {
+        return Promise.resolve({ subtitles: [{
+            url: '#', lang: 'zxx', label: 'Veuillez configurer l\'add-on sur la page web. Clé DeepL ou Langue Cible manquante.'
+        }]});
+    }
+
+    // 1. Récupérer les sous-titres de la source intégrée (opensubtitles.js)
+    let opensubtitlesSubs = [];
     try {
-      const translatecheck = await connection.checkForTranslation(
-        imdbid,
-        season,
-        episode,
-        iso639_1
-      );
-
-      if (translatecheck === null || translatecheck === false) {
-        const paths = await connection.getsubtitles(
-          imdbid,
-          season,
-          episode,
-          iso639_1
-        );
-
-        const seriesExists = await connection.checkseries(imdbid);
-        if (seriesExists === null) {
-          throw new Error("Database error while checking series");
-        }
-
-        if (seriesExists) {
-          if (paths && paths.length > 0) {
-            const subtitle = await fetchSubtitles(
-              imdbid,
-              season,
-              episode,
-              paths.length,
-              type,
-              iso639_2
-            );
-            logger.info(
-              `Sending existing subtitles: ${JSON.stringify(subtitle)}`
-            );
-            return { subtitles: subtitle };
-          }
-        }
-
-        // Handle new subtitle processing
-        const subs = await opensubtitles.getsubtitles(
-          type,
-          imdbid,
-          season,
-          episode,
-          iso639_2
-        );
-
-        if (subs && subs.length > 0) {
-          const apiCheckResult = await processfiles.checkremainingapi(
-            subs,
-            imdbid,
-            season,
-            episode,
-            iso639_1,
-            config.apikey,
-            apikeyremaining
-          );
-
-          if (!apiCheckResult) {
-            logger.warn("API limit reached, returning error message");
-            return {
-              subtitles: [
-                {
-                  id: `Apikey error`,
-                  url: `https://deeplsubtitle.sonsuzanime.com/subtitles/apikeyerror.srt`,
-                  lang: iso639_2,
-                },
-              ],
-            };
-          }
-
-          const subtitles = [
-            {
-              id: `Information`,
-              url: `https://deeplsubtitle.sonsuzanime.com/subtitles/information.srt`,
-              lang: iso639_2,
-            },
-          ];
-
-          const translatedsubs = await fetchSubtitles(
-            imdbid,
-            season,
-            episode,
-            subs.length,
-            type,
-            iso639_2
-          );
-
-          logger.info(`Returning translated subtitles with information`);
-          return { subtitles: [...subtitles, ...translatedsubs] };
-        }
-
-        logger.warn(
-          `No subtitles found for ${imdbid}, returning not found message`
-        );
-        return {
-          subtitles: [
-            {
-              id: `Not found`,
-              url: `https://deeplsubtitle.sonsuzanime.com/subtitles/notfound.srt`,
-              lang: iso639_2,
-            },
-          ],
-        };
-      }
-
-      // Handle existing translation
-      logger.info(
-        `Found existing translation for ${imdbid}, preparing response`
-      );
-      const subtitles = [
-        {
-          id: `Information`,
-          url: `https://deeplsubtitle.sonsuzanime.com/subtitles/information.srt`,
-          lang: iso639_2,
-        },
-      ];
-
-      const translatedsubs = await fetchSubtitles(
-        imdbid,
-        season,
-        episode,
-        translatecheck,
-        type,
-        iso639_2
-      );
-
-      return { subtitles: [...subtitles, ...translatedsubs] };
-    } catch (error) {
-      logger.error(`Subtitle processing error: ${error.message}`);
-      return { subtitles: [] };
+        // Passe l'objet info et la liste des langues sources
+        opensubtitlesSubs = await opensubtitles.getSubs({ id, type, extra }, SUPPORTED_SOURCE_LANGS);
+    } catch (e) {
+        console.error("Erreur opensubtitles.js:", e.message);
     }
-  } catch (error) {
-    logger.error(`Handler error: ${error.message}`);
-    return { subtitles: [] };
-  }
+    
+    // 2. Récupérer les sous-titres des sources externes
+    let externalSubs = [];
+    if (EXTERNAL_ADDON_URLS.length > 0) {
+        externalSubs = await searchExternalAddons(type, id, EXTERNAL_ADDON_URLS);
+    }
+
+    // 3. Fusionner TOUS les sous-titres sources trouvés
+    const allSourceSubs = [
+        ...opensubtitlesSubs, 
+        ...externalSubs
+    ];
+    
+    if (allSourceSubs.length === 0) {
+        return Promise.resolve({ subtitles: [{ url: '#', lang: 'zxx', label: 'Aucun sous-titre source trouvé dans les langues prises en charge.' }] });
+    }
+
+    // 4. Choix du MEILLEUR sous-titre source (le premier de la liste combinée)
+    const bestSourceSub = allSourceSubs[0];
+    
+    // 5. Procéder à la traduction
+    console.log(`Traduction du sous-titre source: ${bestSourceSub.lang} (${bestSourceSub.label}) vers ${TARGET_LANG}`);
+    
+    // Appeler la fonction de traduction
+    let translatedSubtitles;
+    try {
+        translatedSubtitles = await translate(bestSourceSub, TARGET_LANG, DEEPL_AUTH_KEY);
+    } catch (e) {
+        console.error("Erreur de traduction DeepL:", e.message);
+        return Promise.resolve({ subtitles: [{
+            url: '#', lang: 'zxx', label: `Erreur de traduction DeepL: ${e.message}`
+        }]});
+    }
+
+    // 6. Retourner les sous-titres : Traduit, et l'original comme option
+    return Promise.resolve({
+        subtitles: [
+            ...translatedSubtitles, // Le sous-titre traduit
+            // Inclure l'original comme 'fallback'
+            {
+                url: bestSourceSub.url,
+                lang: bestSourceSub.lang,
+                label: `[Original Source] ${bestSourceSub.label}`
+            }
+        ]
+    });
 });
 
-async function fetchSubtitles(
-  imdbid,
-  season = null,
-  episode = null,
-  count,
-  type,
-  langcode
-) {
-  const subtitles = [];
-  let iso639_1 = languages.getISO639_1Code(langcode);
-  if (iso639_1 === undefined) {
-    iso639_1 = langcode;
-  }
-  if (type === "movie") {
-    for (let i = 1; i <= count; i++) {
-      const subtitle = {
-        id: `${imdbid}-subtitle-${i}`,
-        url: `https://deeplsubtitle.sonsuzanime.com/subtitles/${iso639_1}/${imdbid}/${imdbid}-translated-${i}.srt`,
-        lang: langcode,
-      };
-      subtitles.push(subtitle);
-    }
-  } else {
-    for (let i = 1; i <= count; i++) {
-      const subtitle = {
-        id: `${imdbid}-${season}-${episode}subtitle-${i}`,
-        url: `https://deeplsubtitle.sonsuzanime.com/subtitles/${iso639_1}/${imdbid}/season${season}/${imdbid}-translated-${episode}-${i}.srt`,
-        lang: langcode,
-      };
-      subtitles.push(subtitle);
-    }
-  }
-
-  return subtitles;
+// Lancer le serveur (si l'add-on est exécuté en tant que module principal)
+if (require.main === module) {
+    serveHTTP(builder.get manifestó(), { port: process.env.PORT || 7000 });
 }
 
-function parseId(id) {
-  if (id.startsWith("tt")) {
-    const match = id.match(/tt(\d+):(\d+):(\d+)/);
-    if (match) {
-      const [, , season, episode] = match;
-      return {
-        type: "series",
-        season: Number(season),
-        episode: Number(episode),
-      };
-    } else {
-      return { type: "movie" };
-    }
-  } else {
-    return { type: "unknown", season: 0, episode: 0 };
-  }
-}
-
-const port = process.env.PORT || 3000;
-const address = process.env.ADDRESS || "0.0.0.0";
-
-logger.info(`Starting server on ${address}:${port}`);
-serveHTTP(builder.getInterface(), {
-  cacheMaxAge: 10,
-  port: port,
-  address: address,
-  static: "/subtitles",
-});
+module.exports = builder.getManifest();
