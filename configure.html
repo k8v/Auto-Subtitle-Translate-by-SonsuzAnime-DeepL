@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Auto-Subtitle Translate (DeepL) Configuration</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; background-color: #2e3440; color: #eceff4; }
+        label { display: block; margin-top: 15px; font-weight: bold; }
+        input[type="text"], select, textarea { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; border: 1px solid #4c566a; border-radius: 4px; background-color: #3b4252; color: #eceff4; }
+        button { margin-top: 20px; padding: 10px 15px; background-color: #88c0d0; color: #2e3440; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        button:hover { background-color: #81a1c1; }
+        .hint { font-size: 0.8em; color: #a3be8c; margin-top: 5px; }
+        textarea { height: 100px; resize: vertical; }
+    </style>
+</head>
+<body>
+    <h1>Configuration de l'Add-on Sous-titres Auto-Traduits (DeepL)</h1>
+
+    <form id="configForm">
+        <label for="deeplAuthKey">Clé d'Authentification DeepL</label>
+        <input type="text" id="deeplAuthKey" name="deeplAuthKey" required>
+        <div class="hint">Votre clé d'API DeepL (exemple: "f1a9d0e6-9b5a-4c2d-8e7f-b6c3a2e1d4f0:fx").</div>
+
+        <label for="targetLanguage">Langue Cible de la Traduction</label>
+        <select id="targetLanguage" name="targetLanguage" required>
+            <option value="EN">Anglais (EN)</option>
+            <option value="FR" selected>Français (FR)</option>
+            <option value="ES">Espagnol (ES)</option>
+            <option value="DE">Allemand (DE)</option>
+            <option value="IT">Italien (IT)</option>
+            <option value="PT">Portugais (PT)</option>
+            <option value="PL">Polonais (PL)</option>
+            <option value="RU">Russe (RU)</option>
+            </select>
+        <div class="hint">La langue vers laquelle les sous-titres sources seront traduits.</div>
+        
+        <h2>Sources de Sous-titres Supplémentaires</h2>
+        <label for="externalAddons">URLs des Manifestes d'Add-ons Externes</label>
+        <textarea id="externalAddons" name="externalAddons" placeholder="Exemples :
+https://subhero.onrender.com/manifest.json
+https://gestdown.dyhio.top/manifest.json
+(Une URL par ligne)">
+</textarea>
+        <div class="hint">Ajoutez ici les URLs complètes des manifestes (`manifest.json`) d'autres add-ons de sous-titres Stremio.</div>
+
+        <button type="submit">Installer l'Add-on</button>
+    </form>
+
+    <script>
+        document.getElementById('configForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const config = {
+                deeplAuthKey: document.getElementById('deeplAuthKey').value,
+                targetLanguage: document.getElementById('targetLanguage').value,
+                // Nettoie et transforme la liste des URLs en un tableau
+                externalAddons: document.getElementById('externalAddons').value
+                                    .split('\n')
+                                    .map(url => url.trim())
+                                    .filter(url => url.length > 0)
+            };
+            
+            // Construit l'URL du manifest avec la configuration
+            const manifestUrl = window.location.origin + '/manifest.json?config=' + encodeURIComponent(JSON.stringify(config));
+            
+            // Redirige l'utilisateur vers l'installation Stremio
+            window.location.href = 'stremio://' + manifestUrl;
+        });
+        
+        // Optionnel : Pour charger les valeurs par défaut ou existantes si l'utilisateur revient
+        window.onload = function() {
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const currentConfig = JSON.parse(urlParams.get('config'));
+                if (currentConfig) {
+                    document.getElementById('deeplAuthKey').value = currentConfig.deeplAuthKey || '';
+                    document.getElementById('targetLanguage').value = currentConfig.targetLanguage || 'FR';
+                    document.getElementById('externalAddons').value = (currentConfig.externalAddons || []).join('\n');
+                }
+            } catch (e) {
+                console.log("Pas de configuration existante à charger.");
+            }
+        };
+    </script>
+</body>
+</html>
