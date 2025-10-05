@@ -1,102 +1,49 @@
-const axios = require("axios");
-const connection = require("./connection");
-const fs = require("fs").promises;
-const logger = require("./logger");
+const request = require('request-promise-native');
 
-const opensubtitlesbaseurl = "https://opensubtitles-v3.strem.io/subtitles/";
+// L'URL de l'API OpenSubtitles V3 utilisée par cet add-on
+const OPENSUBTITLES_URL = 'https://opensubtitles-v3.strem.io';
 
-const downloadSubtitles = async (
-  subtitles,
-  imdbid,
-  season = null,
-  episode = null,
-  iso639_1
-) => {
-  let uniqueTempFolder = null;
-  if (season && episode) {
-    await fs.mkdir(`subtitles/${iso639_1}/${imdbid}/season${season}`, {
-      recursive: true,
-    });
-    uniqueTempFolder = `subtitles/${iso639_1}/${imdbid}/season${season}`;
-  } else {
-    await fs.mkdir(`subtitles/${iso639_1}/${imdbid}`, { recursive: true });
-    uniqueTempFolder = `subtitles/${iso639_1}/${imdbid}`;
-  }
+/**
+ * Récupère les sous-titres d'OpenSubtitles V3 pour une vidéo donnée.
+ * * @param {object} info - Contient les détails de la vidéo { id, type, extra }
+ * @param {Array<string>} supportedLangs - Liste des codes de langue sources à rechercher (ex: ['eng', 'fra', 'deu'])
+ * @returns {Promise<Array<object>>} - Tableau de sous-titres au format Stremio
+ */
+exports.getSubs = async (info, supportedLangs) => {
+    // id est généralement au format 'ttXXXXXX' ou 'ttXXXXXX:s01e01'
+    const { id, type } = info;
 
-  let filepaths = [];
+    if (!id || !type) {
+        return [];
+    }
 
-  for (let i = 0; i < subtitles.length; i++) {
-    const url = subtitles[i];
     try {
-      const response = await axios.get(url, { responseType: "arraybuffer" });
-      let filePath = null;
-      if (episode) {
-        filePath = `${uniqueTempFolder}/${imdbid}-subtitle_${episode}-${
-          i + 1
-        }.srt`;
-      } else {
-        filePath = `${uniqueTempFolder}/${imdbid}-subtitle-${i + 1}.srt`;
-      }
-      logger.debug(`Processing subtitle file: ${filePath}`);
-      await fs.writeFile(filePath, response.data);
-      logger.info(`Subtitle downloaded and saved: ${filePath}`);
-      filepaths.push(filePath);
-    } catch (error) {
-      logger.error(`Subtitle download error for ${url}: ${error.message}`);
-    }
-  }
-  return filepaths;
-};
+        const subRequestUrl = `${OPENSUBTITLES_URL}/subtitles/${type}/${id}.json`;
 
-const getsubtitles = async (
-  type,
-  imdbid,
-  season = null,
-  episode = null,
-  iso639_2
-) => {
-  let url = opensubtitlesbaseurl;
+        const response = await request({
+            uri: subRequestUrl,
+            json: true
+        });
 
-  if (type === "series") {
-    url = url.concat(type, "/", imdbid, ":", season, ":", episode, ".json");
-  } else {
-    url = url.concat(type, "/", imdbid, ".json");
-  }
-
-  logger.debug(`Fetching subtitles from URL: ${url}`);
-
-  try {
-    const response = await axios.get(url);
-    if (response.data.subtitles.length > 0) {
-      if (
-        response.data.subtitles.filter((subtitle) => subtitle.lang === iso639_2)
-          .length > 0
-      ) {
-        logger.info(
-          `Subtitles already exist for ${imdbid} in language ${iso639_2}`
-        );
-        return null;
-      } else {
-        let subtitles = response.data.subtitles
-          .filter((subtitle) => subtitle.lang === "eng")
-          .map((subtitle) => subtitle.url);
-        if (subtitles.length === 0) {
-          logger.info(
-            `No English subtitles found, using first available subtitle`
-          );
-          subtitles = [response.data.subtitles[0].url];
+        if (!response || !Array.isArray(response.subtitles)) {
+            return [];
         }
-        logger.info(`Found ${subtitles.length} subtitle(s) for ${imdbid}`);
-        return subtitles.slice(0, 1);
-      }
-    } else {
-      logger.warn(`No subtitles found for ${imdbid}`);
-      return null;
-    }
-  } catch (error) {
-    logger.error(`Failed to fetch subtitles for ${imdbid}: ${error.message}`);
-    return null;
-  }
-};
 
-module.exports = { getsubtitles, downloadSubtitles };
+        // 1. Filtrer les sous-titres par la liste des langues sources que nous supportons.
+        // On utilise .toLowerCase() car les langues dans la liste supportée sont en minuscules.
+        const subtitles = response.subtitles
+            .filter(sub => supportedLangs.includes(sub.lang.toLowerCase()))
+            .map(sub => ({
+                ...sub,
+                // 2. Ajout de l'étiquette [OpenSubs] pour identifier la source
+                label: `[OpenSubs] ${sub.label}`,
+                source: 'OpenSubtitles'
+            }));
+
+        return subtitles;
+
+    } catch (e) {
+        console.error(`Erreur OpenSubtitles V3 pour ${id}:`, e.message);
+        return [];
+    }
+};
