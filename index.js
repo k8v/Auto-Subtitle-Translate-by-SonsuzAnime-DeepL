@@ -1,7 +1,6 @@
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
-const translate = require('./deepl-translate');
 const opensubtitles = require('./opensubtitles');
-const request = require('request-promise-native'); // Utilisé pour les requêtes aux add-ons externes
+const request = require('request-promise-native'); // Utilisé pour les requêtes aux add-ons externes et l'API DeepL
 
 // Codes de langue (ISO 639-2/639-1) que nous allons rechercher dans TOUTES les sources.
 // Ces langues seront utilisées comme 'source' pour la traduction DeepL.
@@ -17,15 +16,70 @@ const SUPPORTED_SOURCE_LANGS = [
 ];
 
 // --------------------------------------------------------------------------------
+// Fonction de Traduction DeepL (Intégrée)
+// --------------------------------------------------------------------------------
+
+/**
+ * Fonction pour traduire le contenu d'un sous-titre via DeepL.
+ */
+async function translate(subtitle, targetLang, deeplAuthKey) {
+    if (!deeplAuthKey || !targetLang) {
+        throw new Error("Clé DeepL ou langue cible manquante.");
+    }
+    
+    // 1. Récupérer le contenu du sous-titre source
+    const subContent = await request.get(subtitle.url);
+
+    // 2. Préparer les données pour l'API DeepL
+    const deeplEndpoint = deeplAuthKey.endsWith(':fx') 
+        ? 'https://api-free.deepl.com/v2/translate' // Free API
+        : 'https://api.deepl.com/v2/translate';    // Pro API
+
+    const formData = {
+        auth_key: deeplAuthKey,
+        text: subContent,
+        source_lang: subtitle.lang.toUpperCase(),
+        target_lang: targetLang.toUpperCase(),
+        tag_handling: 'xml' // Pour protéger les balises SRT/VTT
+    };
+
+    try {
+        // 3. Appeler l'API DeepL
+        const response = await request.post({
+            uri: deeplEndpoint,
+            form: formData,
+            json: true
+        });
+
+        if (response.translations && response.translations.length > 0) {
+            const translatedText = response.translations[0].text;
+            
+            // 4. Créer le sous-titre traduit (encodage Base64)
+            const translatedSubtitle = {
+                url: `data:application/x-subrip;base64,${Buffer.from(translatedText).toString('base64')}`,
+                lang: targetLang.toLowerCase(),
+                label: `Traduit par DeepL (${subtitle.lang.toUpperCase()} > ${targetLang.toUpperCase()})`
+            };
+            
+            return [translatedSubtitle];
+        }
+
+        throw new Error("Réponse DeepL invalide ou traduction manquante.");
+
+    } catch (error) {
+        console.error("Erreur lors de l'appel à l'API DeepL:", error.message);
+        throw new Error(`Erreur DeepL : ${error.message}`);
+    }
+}
+
+
+// --------------------------------------------------------------------------------
 // Nouvelle fonction pour interroger les add-ons externes configurés
 // --------------------------------------------------------------------------------
 
 /**
  * Interroge les add-ons de sous-titres externes pour obtenir des sous-titres.
- * @param {string} type - 'movie' ou 'series'
- * @param {string} id - L'ID de Stremio (ex: 'tt1234567')
- * @param {Array<string>} externalAddonUrls - Liste des URLs de manifestes des add-ons externes
- * @returns {Promise<Array<Object>>} - Tableau de sous-titres au format Stremio
+ * ... (Le reste de la fonction searchExternalAddons est inchangé)
  */
 async function searchExternalAddons(type, id, externalAddonUrls) {
     let allExternalSubs = [];
@@ -162,6 +216,7 @@ builder.defineSubtitlesHandler(async ({ id, type, extra }) => {
     // Appeler la fonction de traduction
     let translatedSubtitles;
     try {
+        // *** APPEL DE LA FONCTION INTÉGRÉE ***
         translatedSubtitles = await translate(bestSourceSub, TARGET_LANG, DEEPL_AUTH_KEY);
     } catch (e) {
         console.error("Erreur de traduction DeepL:", e.message);
@@ -186,6 +241,7 @@ builder.defineSubtitlesHandler(async ({ id, type, extra }) => {
 
 // Lancer le serveur (si l'add-on est exécuté en tant que module principal)
 if (require.main === module) {
+    // CORRECTION : getManifest()
     serveHTTP(builder.getManifest(), { port: process.env.PORT || 7000 });
 }
 
